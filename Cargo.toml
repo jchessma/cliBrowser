@@ -1,0 +1,67 @@
+[package]
+name = "clibrowser"
+version = "0.1.0"
+edition = "2021"
+description = "A full-featured CLI web browser"
+
+[[bin]]
+name = "clibrowser"
+path = "src/main.rs"
+
+[features]
+default = ["quickjs-engine"]
+quickjs-engine = ["dep:rquickjs"]
+chrome-engine = ["dep:chromiumoxide"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP networking
+reqwest = { version = "0.12", features = ["cookies", "gzip", "brotli", "deflate", "rustls-tls", "blocking"], default-features = false }
+
+# URL handling
+url = "2"
+
+# HTML parsing
+scraper = "0.22"
+ego-tree = "0.10"
+
+# CSS parsing
+lightningcss = { version = "1.0.0-alpha.71", features = [] }
+
+# JavaScript engines (optional backends)
+rquickjs = { version = "0.8", features = ["full"], optional = true }
+chromiumoxide = { version = "0.7", features = ["tokio-runtime"], optional = true }
+
+# TUI
+ratatui = { version = "0.29", features = ["crossterm", "unstable-widget-ref"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# Serialization (config, bookmarks, cookies)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
+# Utilities
+dirs = "5"
+mime = "0.3"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+regex = "1"
+unicode-width = "0.2"
+textwrap = "0.16"
+open = "5"
+futures = "0.3"
+bytes = "1"
+percent-encoding = "2"
+chrono = { version = "0.4", features = ["serde"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
