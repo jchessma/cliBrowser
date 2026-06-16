@@ -112,7 +112,8 @@ impl App {
         };
 
         let doc = crate::dom::parse_html(&html);
-        let layout = page_layout::layout(&doc.root);
+        let js_enabled = self.js_engine.name() != "none";
+        let layout = page_layout::layout_with_opts(&doc.root, js_enabled);
 
         let page = LoadedPage {
             url: resp.url.clone(),
@@ -568,7 +569,8 @@ impl App {
         };
 
         let doc = crate::dom::parse_html(&html);
-        let layout = page_layout::layout(&doc.root);
+        let js_enabled = self.js_engine.name() != "none";
+        let layout = page_layout::layout_with_opts(&doc.root, js_enabled);
 
         self.state.current_page = Some(LoadedPage {
             url: resp.url,

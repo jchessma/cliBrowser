@@ -97,25 +97,54 @@ pub struct LayoutResult {
 struct Ctx {
     links: Vec<Link>,
     list_stack: Vec<(bool, usize)>, // (ordered, counter)
-    in_pre: bool,
-    form_fields: Vec<FormField>,
+    js_enabled: bool,
 }
 
 pub fn layout(doc: &Node) -> LayoutResult {
+    layout_with_opts(doc, true)
+}
+
+pub fn layout_with_opts(doc: &Node, js_enabled: bool) -> LayoutResult {
     let mut ctx = Ctx {
         links: Vec::new(),
         list_stack: Vec::new(),
-        in_pre: false,
-        form_fields: Vec::new(),
+        js_enabled,
     };
 
     let mut blocks = Vec::new();
     walk(doc, &mut ctx, &mut blocks, &StyleState::default());
 
+    let blocks = collapse_spacers(blocks);
+
     LayoutResult {
         blocks,
         links: ctx.links,
     }
+}
+
+/// Collapse consecutive Spacers and strip leading/trailing ones.
+fn collapse_spacers(blocks: Vec<Block>) -> Vec<Block> {
+    let mut result: Vec<Block> = Vec::with_capacity(blocks.len());
+    let mut last_spacer = false;
+    for block in blocks {
+        match block {
+            Block::Spacer => {
+                if !last_spacer && !result.is_empty() {
+                    result.push(Block::Spacer);
+                    last_spacer = true;
+                }
+            }
+            other => {
+                last_spacer = false;
+                result.push(other);
+            }
+        }
+    }
+    // Remove trailing spacer
+    if matches!(result.last(), Some(Block::Spacer)) {
+        result.pop();
+    }
+    result
 }
 
 /// Inherited style state during tree walk.
@@ -138,24 +167,56 @@ fn walk(node: &Node, ctx: &mut Ctx, blocks: &mut Vec<Block>, style: &StyleState)
             } else {
                 normalize_whitespace(text)
             };
-            if !t.is_empty() {
-                let span = Span {
-                    text: t,
-                    bold: style.bold,
-                    italic: style.italic,
-                    underline: style.underline,
-                    strikethrough: style.strikethrough,
-                    link_index: style.link_index,
-                    fg: style.fg,
-                    bg: None,
-                };
-                push_inline(blocks, span);
+            // Skip whitespace-only spans unless we're at a block boundary
+            // (they appear from newlines between tags and add noise)
+            if t.is_empty() || (!style.in_pre && t == " ") {
+                return;
             }
+            push_inline(blocks, Span {
+                text: t,
+                bold: style.bold,
+                italic: style.italic,
+                underline: style.underline,
+                strikethrough: style.strikethrough,
+                link_index: style.link_index,
+                fg: style.fg,
+                bg: None,
+            });
         }
         NodeData::Element { tag, attrs } => {
-            let computed = css::default_style_for_tag(tag);
+            // noscript: show content only when JS is disabled
+            if tag == "noscript" {
+                if !ctx.js_enabled {
+                    for child in &node.children {
+                        walk(child, ctx, blocks, style);
+                    }
+                }
+                return;
+            }
+
+            // head is normally invisible but may contain <noscript> with fallback content
+            if tag == "head" {
+                for child in &node.children {
+                    if child.tag() == Some("noscript") {
+                        walk(child, ctx, blocks, style);
+                    }
+                }
+                return;
+            }
+
+            let mut computed = css::default_style_for_tag(tag);
+
+            // Apply inline style="" attribute overrides
+            if let Some(style_attr) = attrs.get("style") {
+                css::apply_inline_style(style_attr, &mut computed);
+            }
 
             if computed.display == Display::None {
+                return;
+            }
+
+            // Also respect hidden attribute
+            if attrs.contains_key("hidden") {
                 return;
             }
 
@@ -174,6 +235,13 @@ fn walk(node: &Node, ctx: &mut Ctx, blocks: &mut Vec<Block>, style: &StyleState)
             }
             if computed.white_space == WhiteSpace::Pre {
                 child_style.in_pre = true;
+            }
+            if let Some(color) = computed.color {
+                child_style.fg = Some(color);
+            }
+            // visibility:hidden → don't render children
+            if computed.visibility == css::Visibility::Hidden {
+                return;
             }
 
             match tag.as_str() {
@@ -427,13 +495,11 @@ fn parse_input(attrs: &std::collections::HashMap<String, String>) -> FormField {
     }
 }
 
-/// Flush accumulated inline spans into a Paragraph block.
-fn flush_to_paragraph(_blocks: &mut Vec<Block>) {
-    // Find the last pending inline accumulator — we use a special marker
-    // approach: trailing spans are wrapped in a Paragraph.
-    // Actually our approach is simpler: push_inline appends to the last
-    // Paragraph; here we just close it by starting fresh.
-    // (No-op if last block isn't a partial paragraph.)
+/// Close the current inline context so the next push_inline starts a fresh Paragraph.
+fn flush_to_paragraph(blocks: &mut Vec<Block>) {
+    if matches!(blocks.last(), Some(Block::Paragraph(_))) {
+        blocks.push(Block::Spacer);
+    }
 }
 
 fn flush_inner_paragraph(blocks: &mut Vec<Block>) {

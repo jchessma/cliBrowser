@@ -8,6 +8,10 @@ description = "A full-featured CLI web browser"
 name = "clibrowser"
 path = "src/main.rs"
 
+[lib]
+name = "clibrowser"
+path = "src/lib.rs"
+
 [features]
 default = ["quickjs-engine"]
 quickjs-engine = ["dep:rquickjs"]
