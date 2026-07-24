@@ -63,6 +63,10 @@ impl App {
     async fn navigate(&mut self, raw_url: &str) -> Result<()> {
         let url_str = normalize_url(raw_url);
 
+        if let Some(inner) = url_str.strip_prefix("view-source:") {
+            return self.view_source(inner).await;
+        }
+
         if url_str.starts_with("about:") {
             self.load_about(&url_str);
             self.history.navigate(url_str);
@@ -232,6 +236,7 @@ impl App {
             tab_order: layout.tab_order,
             raw_html: resp.body,
             status_code: resp.status,
+            is_source: false,
         });
         self.state.reset_navigation();
         self.state.status = PageStatus::Ready;
@@ -261,6 +266,7 @@ impl App {
             tab_order: Vec::new(),
             raw_html: String::new(),
             status_code: 200,
+            is_source: false,
         });
         self.state.reset_navigation();
         self.state.status = PageStatus::Ready;
@@ -354,7 +360,11 @@ impl App {
                 field_values: &self.state.field_values,
             };
 
-            let text = renderer::render(&page.blocks, &page.links, area.width, &focus);
+            let text = if page.is_source {
+                renderer::render_source(&page.raw_html)
+            } else {
+                renderer::render(&page.blocks, &page.links, area.width, &focus)
+            };
             self.total_rendered_lines = text.lines.len();
 
             frame.render_widget(
@@ -469,6 +479,7 @@ impl App {
             "  b             Toggle bookmark",
             "  B             Show bookmarks",
             "  y             Copy link URL",
+            "  Ctrl+U        View page source",
             "  ?             Toggle this help",
             "  q / Ctrl+C    Quit",
         ]
@@ -655,6 +666,22 @@ impl App {
                 self.url_bar_open = true;
                 self.url_bar_input.clear();
             }
+            Action::ViewSource => {
+                // View the source of the current page (strip a leading
+                // `view-source:` if already on a source view).
+                let inner = self.state.current_page.as_ref().map(|p| {
+                    let raw = p.url.to_string();
+                    raw.strip_prefix("view-source:")
+                        .map(str::to_string)
+                        .unwrap_or(raw)
+                });
+                if let Some(inner) = inner {
+                    if let Err(e) = self.view_source(&inner).await {
+                        self.status_msg = Some(format!("Error: {}", e));
+                        self.state.status = PageStatus::Ready;
+                    }
+                }
+            }
             _ => {}
         }
         Ok(false)
@@ -808,12 +835,60 @@ impl App {
     }
 
     async fn navigate_to_history(&mut self, url: &str) -> Result<()> {
+        if let Some(inner) = url.strip_prefix("view-source:") {
+            return self.view_source(inner).await;
+        }
         if url.starts_with("about:") {
             self.load_about(url);
             return Ok(());
         }
         let parsed = Url::parse(url)?;
         self.fetch_and_load(parsed, None).await
+    }
+
+    /// Fetch the raw HTML for `inner` (an http/https URL string) and display it
+    /// as a `view-source:` source view. Always uses the reqwest client —
+    /// view-source shows the original HTTP response, not a JS-rendered DOM, so
+    /// the JS backend is bypassed regardless of `--chrome`/`--no-js`.
+    async fn view_source(&mut self, inner: &str) -> Result<()> {
+        let url_str = normalize_url(inner);
+        let url = Url::parse(&url_str)?;
+
+        self.state.status = PageStatus::Loading;
+        self.status_msg = Some(format!("Loading source for {}…", url));
+
+        let resp = match self.client.get(&url, &self.cookies).await {
+            Ok(r) => r,
+            Err(e) => {
+                self.state.status = PageStatus::Error(e.to_string());
+                self.status_msg = Some(format!("Error: {}", e));
+                return Err(e);
+            }
+        };
+        for cookie in &resp.set_cookies {
+            self.cookies.parse_set_cookie(&resp.url, cookie);
+        }
+
+        let view_url = format!("view-source:{}", resp.url);
+        let title = format!("Source: {}", resp.url.host_str().unwrap_or(resp.url.as_str()));
+        self.history.navigate(view_url.clone());
+
+        self.state.current_page = Some(LoadedPage {
+            url: Url::parse(&view_url).unwrap_or(resp.url),
+            title,
+            blocks: Vec::new(),
+            links: Vec::new(),
+            forms: Vec::new(),
+            form_fields: Vec::new(),
+            tab_order: Vec::new(),
+            raw_html: resp.body,
+            status_code: resp.status,
+            is_source: true,
+        });
+        self.state.reset_navigation();
+        self.state.status = PageStatus::Ready;
+        self.status_msg = None;
+        Ok(())
     }
 
     async fn handle_url_input(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
@@ -850,6 +925,7 @@ fn normalize_url(raw: &str) -> String {
     if raw.starts_with("http://")
         || raw.starts_with("https://")
         || raw.starts_with("about:")
+        || raw.starts_with("view-source:")
     {
         return raw.to_string();
     }

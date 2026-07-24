@@ -22,6 +22,7 @@ pub enum Action {
     ShowHelp,
     CopyLinkUrl,
     ToggleCheck,
+    ViewSource,
     None,
 }
 
@@ -73,6 +74,8 @@ pub fn map_key(key: KeyEvent) -> Action {
         (KeyModifiers::NONE, KeyCode::Char('?')) => Action::ShowHelp,
 
         (KeyModifiers::NONE, KeyCode::Char('y')) => Action::CopyLinkUrl,
+
+        (KeyModifiers::CONTROL, KeyCode::Char('u')) => Action::ViewSource,
 
         _ => Action::None,
     }

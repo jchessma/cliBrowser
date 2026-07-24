@@ -36,6 +36,26 @@ pub fn render(
     Text::from(lines)
 }
 
+/// Render raw HTML source (`view-source:`) as line-numbered monospace text.
+///
+/// Unlike `Block::Pre`, this is a full-page source view: no surrounding box,
+/// just a right-aligned line-number gutter in `DarkGray` followed by the raw
+/// line. Long lines are wrapped by the caller's `Paragraph::wrap`.
+pub fn render_source(raw: &str) -> Text<'static> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (i, line) in raw.lines().enumerate() {
+        let gutter = format!("{:>5} ", i + 1);
+        lines.push(Line::from(vec![
+            RSpan::styled(gutter, Style::default().fg(Color::DarkGray)),
+            RSpan::raw(line.to_string()),
+        ]));
+    }
+    if lines.is_empty() {
+        lines.push(Line::raw(""));
+    }
+    Text::from(lines)
+}
+
 fn render_block(
     block: &Block,
     links: &[Link],

@@ -20,6 +20,9 @@ pub struct LoadedPage {
     pub tab_order: Vec<TabItem>,
     pub raw_html: String,
     pub status_code: u16,
+    /// When true, the page is a `view-source:` view: `raw_html` is rendered
+    /// directly as line-numbered source instead of `blocks`.
+    pub is_source: bool,
 }
 
 pub struct BrowserState {
