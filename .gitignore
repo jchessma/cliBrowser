@@ -1,1 +1,4 @@
 /target
+
+# Recall plugin local context
+.recall/

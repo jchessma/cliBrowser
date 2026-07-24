@@ -1,3 +1,3 @@
 mod terminal;
 
-pub use terminal::render;
+pub use terminal::{render, PageFocus};

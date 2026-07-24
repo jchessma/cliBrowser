@@ -21,6 +21,7 @@ pub enum Action {
     ShowHistory,
     ShowHelp,
     CopyLinkUrl,
+    ToggleCheck,
     None,
 }
 
@@ -38,9 +39,9 @@ pub fn map_key(key: KeyEvent) -> Action {
         (KeyModifiers::NONE, KeyCode::Char('d')) => Action::ScrollDown(10),
         (KeyModifiers::NONE, KeyCode::Char('u')) => Action::ScrollUp(10),
 
-        (KeyModifiers::NONE, KeyCode::PageDown)
-        | (KeyModifiers::NONE, KeyCode::Char(' ')) => Action::PageDown,
+        (KeyModifiers::NONE, KeyCode::PageDown) => Action::PageDown,
         (KeyModifiers::NONE, KeyCode::PageUp) => Action::PageUp,
+        (KeyModifiers::NONE, KeyCode::Char(' ')) => Action::ToggleCheck,
 
         (KeyModifiers::NONE, KeyCode::Char('g')) => Action::GoToTop,
         (KeyModifiers::NONE, KeyCode::Char('G')) => Action::GoToBottom,
@@ -54,7 +55,8 @@ pub fn map_key(key: KeyEvent) -> Action {
 
         // History navigation
         (KeyModifiers::NONE, KeyCode::Char('H'))
-        | (KeyModifiers::ALT, KeyCode::Left) => Action::Back,
+        | (KeyModifiers::ALT, KeyCode::Left)
+        | (KeyModifiers::NONE, KeyCode::Backspace) => Action::Back,
         (KeyModifiers::NONE, KeyCode::Char('L'))
         | (KeyModifiers::ALT, KeyCode::Right) => Action::Forward,
 

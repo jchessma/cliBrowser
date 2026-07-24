@@ -39,14 +39,32 @@ pub struct Link {
     pub url: String,
 }
 
+/// A `<form>` element's metadata.
+#[derive(Debug, Clone)]
+pub struct Form {
+    pub action: String,
+    pub method: FormMethod,
+    pub enctype: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FormMethod {
+    Get,
+    Post,
+}
+
 /// An input field in a form.
 #[derive(Debug, Clone)]
 pub struct FormField {
+    /// Unique index across all fields on the page (used for stable identity).
+    pub index: usize,
+    /// Which form this field belongs to.
+    pub form_index: usize,
     pub field_type: FormFieldType,
     pub name: String,
-    pub value: String,
-    pub label: String,
-    pub options: Vec<(String, String)>, // value, label
+    /// Default / initial value from HTML.
+    pub default_value: String,
+    pub options: Vec<(String, String)>, // (value, label) for <select>
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -91,13 +109,29 @@ pub enum Block {
 pub struct LayoutResult {
     pub blocks: Vec<Block>,
     pub links: Vec<Link>,
+    pub forms: Vec<Form>,
+    /// All form fields in document order, indexed by FormField::index.
+    pub form_fields: Vec<FormField>,
+    /// Tab order: interleaved links and fields in document order.
+    pub tab_order: Vec<TabItem>,
+}
+
+/// A focusable element reachable via Tab.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TabItem {
+    Link(usize),
+    Field(usize),
 }
 
 /// State threaded through the walk.
 struct Ctx {
     links: Vec<Link>,
+    forms: Vec<Form>,
+    form_fields: Vec<FormField>,
     list_stack: Vec<(bool, usize)>, // (ordered, counter)
     js_enabled: bool,
+    /// Stack of form indices as we descend into nested form contexts.
+    form_stack: Vec<usize>,
 }
 
 pub fn layout(doc: &Node) -> LayoutResult {
@@ -107,18 +141,84 @@ pub fn layout(doc: &Node) -> LayoutResult {
 pub fn layout_with_opts(doc: &Node, js_enabled: bool) -> LayoutResult {
     let mut ctx = Ctx {
         links: Vec::new(),
+        forms: Vec::new(),
+        form_fields: Vec::new(),
         list_stack: Vec::new(),
         js_enabled,
+        form_stack: Vec::new(),
     };
 
     let mut blocks = Vec::new();
     walk(doc, &mut ctx, &mut blocks, &StyleState::default());
 
     let blocks = collapse_spacers(blocks);
+    let tab_order = extract_tab_order(&blocks);
 
     LayoutResult {
         blocks,
         links: ctx.links,
+        forms: ctx.forms,
+        form_fields: ctx.form_fields,
+        tab_order,
+    }
+}
+
+/// Walk blocks collecting focusable elements in document order.
+fn extract_tab_order(blocks: &[Block]) -> Vec<TabItem> {
+    let mut order = Vec::new();
+    let mut seen_links = std::collections::HashSet::new();
+    collect_tab_items(blocks, &mut order, &mut seen_links);
+    order
+}
+
+fn collect_tab_items(
+    blocks: &[Block],
+    order: &mut Vec<TabItem>,
+    seen: &mut std::collections::HashSet<usize>,
+) {
+    for block in blocks {
+        match block {
+            Block::Paragraph(lines) | Block::ListItem { content: lines, .. } => {
+                for line in lines {
+                    for span in line {
+                        if let Some(idx) = span.link_index {
+                            if seen.insert(idx) {
+                                order.push(TabItem::Link(idx));
+                            }
+                        }
+                    }
+                }
+            }
+            Block::Heading { line, .. } => {
+                for span in line {
+                    if let Some(idx) = span.link_index {
+                        if seen.insert(idx) {
+                            order.push(TabItem::Link(idx));
+                        }
+                    }
+                }
+            }
+            Block::TableRow(cells) => {
+                for cell in cells {
+                    for line in cell {
+                        for span in line {
+                            if let Some(idx) = span.link_index {
+                                if seen.insert(idx) {
+                                    order.push(TabItem::Link(idx));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Block::Blockquote(inner) => {
+                collect_tab_items(inner, order, seen);
+            }
+            Block::FormField(f) if f.field_type != FormFieldType::Hidden => {
+                order.push(TabItem::Field(f.index));
+            }
+            _ => {}
+        }
     }
 }
 
@@ -405,38 +505,86 @@ fn walk(node: &Node, ctx: &mut Ctx, blocks: &mut Vec<Block>, style: &StyleState)
                         push_inline(blocks, span);
                     }
                 }
+                "form" => {
+                    flush_to_paragraph(blocks);
+                    let form_index = ctx.forms.len();
+                    let action = attrs.get("action").cloned().unwrap_or_default();
+                    let method = match attrs.get("method").map(|s| s.to_lowercase()).as_deref() {
+                        Some("post") => FormMethod::Post,
+                        _ => FormMethod::Get,
+                    };
+                    let enctype = attrs
+                        .get("enctype")
+                        .cloned()
+                        .unwrap_or_else(|| "application/x-www-form-urlencoded".to_string());
+                    ctx.forms.push(Form { action, method, enctype });
+                    ctx.form_stack.push(form_index);
+                    for child in &node.children {
+                        walk(child, ctx, blocks, &child_style);
+                    }
+                    ctx.form_stack.pop();
+                    flush_to_paragraph(blocks);
+                }
+                "fieldset" | "legend" => {
+                    flush_to_paragraph(blocks);
+                    if tag == "legend" {
+                        child_style.bold = true;
+                    }
+                    for child in &node.children {
+                        walk(child, ctx, blocks, &child_style);
+                    }
+                    flush_to_paragraph(blocks);
+                }
                 "input" => {
-                    let field = parse_input(attrs);
+                    let mut field = parse_input(attrs, ctx);
                     if field.field_type != FormFieldType::Hidden {
+                        ctx.form_fields.push(field.clone());
                         blocks.push(Block::FormField(field));
+                    } else {
+                        ctx.form_fields.push(field);
                     }
                 }
                 "textarea" => {
                     let name = attrs.get("name").cloned().unwrap_or_default();
-                    let value = node.text_content();
-                    blocks.push(Block::FormField(FormField {
+                    let default_value = node.text_content();
+                    let field = FormField {
+                        index: ctx.form_fields.len(),
+                        form_index: ctx.form_stack.last().copied().unwrap_or(0),
                         field_type: FormFieldType::TextArea,
                         name,
-                        value,
-                        label: String::new(),
+                        default_value,
                         options: Vec::new(),
-                    }));
+                    };
+                    ctx.form_fields.push(field.clone());
+                    blocks.push(Block::FormField(field));
                 }
                 "select" => {
                     let name = attrs.get("name").cloned().unwrap_or_default();
                     let mut options = Vec::new();
+                    let mut default_value = String::new();
                     for opt in node.find_all("option") {
                         let val = opt.attr("value").unwrap_or("").to_string();
                         let label = opt.text_content().trim().to_string();
+                        if opt.attr("selected").is_some() && default_value.is_empty() {
+                            default_value = val.clone();
+                        }
                         options.push((val, label));
                     }
-                    blocks.push(Block::FormField(FormField {
+                    if default_value.is_empty() {
+                        if let Some((v, _)) = options.first() {
+                            default_value = v.clone();
+                        }
+                    }
+                    let field = FormField {
+                        index: ctx.form_fields.len(),
+                        form_index: ctx.form_stack.last().copied().unwrap_or(0),
                         field_type: FormFieldType::Select,
                         name,
-                        value: String::new(),
-                        label: String::new(),
+                        default_value,
                         options,
-                    }));
+                    };
+                    ctx.form_fields.push(field.clone());
+                    blocks.push(Block::FormField(field));
                 }
                 "dd" | "dt" => {
                     flush_to_paragraph(blocks);
@@ -468,14 +616,16 @@ fn walk(node: &Node, ctx: &mut Ctx, blocks: &mut Vec<Block>, style: &StyleState)
     }
 }
 
-fn parse_input(attrs: &std::collections::HashMap<String, String>) -> FormField {
-    let input_type = attrs.get("type").map(|s| s.as_str()).unwrap_or("text");
+fn parse_input(attrs: &std::collections::HashMap<String, String>, ctx: &Ctx) -> FormField {
+    let input_type = attrs.get("type").map(|s| s.to_lowercase());
+    let input_type = input_type.as_deref().unwrap_or("text");
     let name = attrs.get("name").cloned().unwrap_or_default();
-    let value = attrs.get("value").cloned().unwrap_or_default();
+    let default_value = attrs.get("value").cloned().unwrap_or_default();
 
     let field_type = match input_type {
         "password" => FormFieldType::Password,
-        "submit" | "button" | "reset" => FormFieldType::Submit,
+        "submit" | "button" => FormFieldType::Submit,
+        "reset" => FormFieldType::Submit, // treat reset as submit for simplicity
         "checkbox" => FormFieldType::Checkbox {
             checked: attrs.contains_key("checked"),
         },
@@ -483,14 +633,16 @@ fn parse_input(attrs: &std::collections::HashMap<String, String>) -> FormField {
             checked: attrs.contains_key("checked"),
         },
         "hidden" => FormFieldType::Hidden,
+        "email" | "search" | "tel" | "url" | "number" | "date" | "text" => FormFieldType::Text,
         _ => FormFieldType::Text,
     };
 
     FormField {
+        index: ctx.form_fields.len(),
+        form_index: ctx.form_stack.last().copied().unwrap_or(0),
         field_type,
         name,
-        value,
-        label: String::new(),
+        default_value,
         options: Vec::new(),
     }
 }

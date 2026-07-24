@@ -1,5 +1,5 @@
 use clibrowser::dom::parse_html;
-use clibrowser::layout::{layout_with_opts, Block};
+use clibrowser::layout::{layout_with_opts, Block, FormFieldType, TabItem};
 
 fn blocks_for(html: &str) -> Vec<Block> {
     let doc = parse_html(html);
@@ -150,4 +150,46 @@ fn inline_bold_applies_to_spans() {
         }
     }
     assert!(found_bold, "Should have found a bold span");
+}
+
+#[test]
+fn form_fields_in_tab_order() {
+    let html = r#"
+        <form action="/search" method="get">
+            <a href="/home">Home</a>
+            <input type="text" name="q" value="">
+            <a href="/about">About</a>
+            <input type="submit" value="Search">
+        </form>
+    "#;
+    let doc = parse_html(html);
+    let result = layout_with_opts(&doc.root, true);
+
+    // Should find 2 links and 2 form fields (text + submit)
+    assert_eq!(result.links.len(), 2, "Should have 2 links");
+    assert_eq!(result.form_fields.len(), 2, "Should have 2 form fields (text + submit)");
+
+    // Tab order: Home link, text input, About link, Submit button
+    assert_eq!(result.tab_order.len(), 4);
+    assert!(matches!(result.tab_order[0], TabItem::Link(0)));
+    assert!(matches!(result.tab_order[1], TabItem::Field(0)));
+    assert!(matches!(result.tab_order[2], TabItem::Link(1)));
+    assert!(matches!(result.tab_order[3], TabItem::Field(1)));
+
+    // Text field should be type Text, submit should be Submit
+    assert_eq!(result.form_fields[0].field_type, FormFieldType::Text);
+    assert_eq!(result.form_fields[1].field_type, FormFieldType::Submit);
+}
+
+#[test]
+fn form_field_name_and_action() {
+    let html = r#"<form action="/search" method="get"><input type="search" name="q"></form>"#;
+    let doc = parse_html(html);
+    let result = layout_with_opts(&doc.root, true);
+
+    assert_eq!(result.forms.len(), 1);
+    assert_eq!(result.forms[0].action, "/search");
+    assert_eq!(result.form_fields.len(), 1);
+    assert_eq!(result.form_fields[0].name, "q");
+    assert_eq!(result.form_fields[0].field_type, FormFieldType::Text);
 }
