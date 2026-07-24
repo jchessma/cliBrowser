@@ -8,8 +8,42 @@ pub struct Response {
     pub url: Url,
     pub status: u16,
     pub content_type: String,
+    /// Text body for HTML/text responses (charset-decoded by reqwest).
     pub body: String,
+    /// Raw bytes for non-HTML (binary) responses, when `body` is empty.
+    pub body_bytes: Option<Vec<u8>>,
     pub set_cookies: Vec<String>,
+}
+
+/// True for content types we attempt to render as a page.
+///
+/// Splits off `;` parameters, lowercases, and accepts only empty (treated as
+/// `text/html` by the client), `text/html`, and `application/xhtml+xml`.
+/// Everything else (text/plain, xml, json, images, pdf, octet-stream, …) is
+/// considered non-HTML and triggers a download prompt instead.
+pub fn is_html_content_type(ct: &str) -> bool {
+    let essence = ct.split(';').next().unwrap_or(ct).trim().to_ascii_lowercase();
+    essence.is_empty() || essence == "text/html" || essence == "application/xhtml+xml"
+}
+
+/// Read a reqwest response body as text (for HTML) or bytes (for binaries),
+/// branching on the content type. HTML keeps reqwest's charset decoding;
+/// binary bodies round-trip intact instead of erroring on invalid UTF-8.
+async fn read_body(
+    resp: reqwest::Response,
+    content_type: &str,
+) -> Result<(String, Option<Vec<u8>>)> {
+    if is_html_content_type(content_type) {
+        let body = resp.text().await.context("Failed to read response body")?;
+        Ok((body, None))
+    } else {
+        let bytes = resp
+            .bytes()
+            .await
+            .context("Failed to read response body")?
+            .to_vec();
+        Ok((String::new(), Some(bytes)))
+    }
 }
 
 pub struct Client {
@@ -71,13 +105,14 @@ impl Client {
             .filter_map(|v| v.to_str().ok().map(String::from))
             .collect();
 
-        let body = resp.text().await.context("Failed to read response body")?;
+        let (body, body_bytes) = read_body(resp, &content_type).await?;
 
         Ok(Response {
             url: final_url,
             status,
             content_type,
             body,
+            body_bytes,
             set_cookies,
         })
     }
@@ -122,14 +157,38 @@ impl Client {
             .filter_map(|v| v.to_str().ok().map(String::from))
             .collect();
 
-        let body_text = resp.text().await.context("Failed to read POST response")?;
+        let (body_text, body_bytes) = read_body(resp, &ct).await?;
 
         Ok(Response {
             url: final_url,
             status,
             content_type: ct,
             body: body_text,
+            body_bytes,
             set_cookies,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_html_content_type;
+
+    #[test]
+    fn html_content_types() {
+        assert!(is_html_content_type("text/html"));
+        assert!(is_html_content_type("text/html; charset=utf-8"));
+        assert!(is_html_content_type("application/xhtml+xml"));
+        assert!(is_html_content_type("")); // absent header defaults to html
+    }
+
+    #[test]
+    fn non_html_content_types() {
+        assert!(!is_html_content_type("text/plain"));
+        assert!(!is_html_content_type("application/json"));
+        assert!(!is_html_content_type("application/pdf"));
+        assert!(!is_html_content_type("image/png"));
+        assert!(!is_html_content_type("application/octet-stream"));
+        assert!(!is_html_content_type("application/xml"));
     }
 }

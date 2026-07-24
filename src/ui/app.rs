@@ -36,8 +36,19 @@ struct App {
     url_bar_input: String,
     show_bookmarks: bool,
     show_help: bool,
+    /// A non-HTML response awaiting the user's save/cancel decision. Its
+    /// presence doubles as the "download prompt open" flag.
+    pending_download: Option<PendingDownload>,
     status_msg: Option<String>,
     total_rendered_lines: usize,
+}
+
+/// A downloaded non-HTML response held while the save/cancel prompt is shown.
+struct PendingDownload {
+    filename: String,
+    bytes: Vec<u8>,
+    content_type: String,
+    save_dir: std::path::PathBuf,
 }
 
 impl App {
@@ -55,6 +66,7 @@ impl App {
             url_bar_input: String::new(),
             show_bookmarks: false,
             show_help: false,
+            pending_download: None,
             status_msg: None,
             total_rendered_lines: 0,
         })
@@ -125,6 +137,9 @@ impl App {
                 for cookie in &resp.set_cookies {
                     self.cookies.parse_set_cookie(&resp.url, cookie);
                 }
+                if resp.body_bytes.is_some() {
+                    return self.offer_download(resp);
+                }
                 self.load_response(resp)?;
                 self.history.navigate(url.to_string());
             }
@@ -163,6 +178,12 @@ impl App {
             self.cookies.parse_set_cookie(&resp.url, cookie);
         }
 
+        // Non-HTML responses (PDF, images, archives, …) are offered as a
+        // download instead of being fed to the HTML parser.
+        if resp.body_bytes.is_some() {
+            return self.offer_download(resp);
+        }
+
         let final_url = resp.url.clone();
         self.history.navigate(final_url.to_string());
         self.load_response(resp)?;
@@ -185,6 +206,7 @@ impl App {
                     status: 200,
                     content_type: "text/html".to_string(),
                     body: r.html.unwrap_or_default(),
+                    body_bytes: None,
                     set_cookies: Vec::new(),
                 }
             }
@@ -273,6 +295,51 @@ impl App {
         self.status_msg = None;
     }
 
+    /// Hold a non-HTML response for the save/cancel prompt instead of rendering
+    /// it. No history entry is created; the current page is left in place.
+    fn offer_download(&mut self, resp: crate::network::Response) -> Result<()> {
+        let bytes = resp.body_bytes.unwrap_or_default();
+        let save_dir = dirs::download_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        let filename = derive_filename(&resp.url, &resp.content_type);
+        self.pending_download = Some(PendingDownload {
+            filename,
+            bytes,
+            content_type: resp.content_type,
+            save_dir,
+        });
+        self.state.status = PageStatus::Ready;
+        self.status_msg = None;
+        Ok(())
+    }
+
+    /// Save the pending download to disk (non-clobbering) and clear the prompt.
+    fn save_download(&mut self) {
+        if let Some(dl) = self.pending_download.take() {
+            let target = unique_path(&dl.save_dir, &dl.filename);
+            match std::fs::write(&target, &dl.bytes) {
+                Ok(_) => {
+                    self.status_msg = Some(format!("Saved: {}", target.display()));
+                }
+                Err(e) => {
+                    self.status_msg = Some(format!("Save failed: {}", e));
+                }
+            }
+        }
+    }
+
+    /// Key handling for the download prompt: y/Enter saves, n/Esc cancels.
+    fn handle_download_prompt_key(&mut self, key: crossterm::event::KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Enter => self.save_download(),
+            KeyCode::Char('n') | KeyCode::Esc => {
+                self.pending_download = None;
+                self.status_msg = Some("Download cancelled".to_string());
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
     fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
 
@@ -297,6 +364,9 @@ impl App {
         }
         if self.show_bookmarks {
             self.draw_bookmarks(frame, area);
+        }
+        if self.pending_download.is_some() {
+            self.draw_download_prompt(frame, area);
         }
     }
 
@@ -548,6 +618,37 @@ impl App {
                 popup,
             );
         }
+    }
+
+    fn draw_download_prompt(&self, frame: &mut Frame, area: Rect) {
+        let Some(dl) = &self.pending_download else {
+            return;
+        };
+        let target = dl.save_dir.join(&dl.filename);
+        let body = format!(
+            "\n  Non-HTML response ({}): {} ({} bytes)\n  Save to: {}\n\n  [y] save   [n]/Esc cancel",
+            dl.content_type,
+            dl.filename,
+            human_size(dl.bytes.len()),
+            target.display()
+        );
+        let width = 64u16.min(area.width);
+        let height = 9u16.min(area.height);
+        let x = area.width.saturating_sub(width) / 2;
+        let y = area.height.saturating_sub(height) / 2;
+        let popup = Rect { x, y, width, height };
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(body)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .title(" Download "),
+                )
+                .style(Style::default().fg(Color::White).bg(Color::Black)),
+            popup,
+        );
     }
 
     async fn handle_action(&mut self, action: Action, viewport_height: usize) -> Result<bool> {
@@ -873,6 +974,18 @@ impl App {
         let title = format!("Source: {}", resp.url.host_str().unwrap_or(resp.url.as_str()));
         self.history.navigate(view_url.clone());
 
+        // Binary responses have no text body to display as source.
+        let raw_html = if resp.body_bytes.is_some() {
+            let size = resp.body_bytes.as_ref().map(|b| b.len()).unwrap_or(0);
+            format!(
+                "Binary content ({}): {} — not viewable as source.\nOpen the URL directly to download.",
+                resp.content_type,
+                human_size(size)
+            )
+        } else {
+            resp.body
+        };
+
         self.state.current_page = Some(LoadedPage {
             url: Url::parse(&view_url).unwrap_or(resp.url),
             title,
@@ -881,7 +994,7 @@ impl App {
             forms: Vec::new(),
             form_fields: Vec::new(),
             tab_order: Vec::new(),
-            raw_html: resp.body,
+            raw_html,
             status_code: resp.status,
             is_source: true,
         });
@@ -987,6 +1100,146 @@ fn encode_form_urlencoded(fields: &[(String, String)]) -> String {
         .join("&")
 }
 
+/// Map a content type to a filename extension (lowercased, no dot). Falls back
+/// to `bin` for unknown types.
+fn extension_for(content_type: &str) -> &'static str {
+    let essence = content_type.split(';').next().unwrap_or(content_type).trim();
+    match essence.to_ascii_lowercase().as_str() {
+        "application/pdf" => "pdf",
+        "application/zip" => "zip",
+        "application/gzip" | "application/x-gzip" => "gz",
+        "application/x-tar" => "tar",
+        "application/x-bzip2" => "bz2",
+        "application/x-7z-compressed" => "7z",
+        "application/json" => "json",
+        "application/xml" | "text/xml" => "xml",
+        "application/javascript" | "text/javascript" => "js",
+        "application/octet-stream" => "bin",
+        "text/plain" => "txt",
+        "text/csv" => "csv",
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        "audio/mpeg" => "mp3",
+        "audio/ogg" => "ogg",
+        "video/mp4" => "mp4",
+        "video/webm" => "webm",
+        _ => "bin",
+    }
+}
+
+/// Derive a download filename from a URL and its content type.
+///
+/// Uses the last non-empty path segment (percent-decoded); appends an extension
+/// from the content type when the segment has none; falls back to `download`
+/// when the path has no usable segment.
+fn derive_filename(url: &Url, content_type: &str) -> String {
+    let last = url
+        .path_segments()
+        .and_then(|segs| segs.filter(|s| !s.is_empty()).last())
+        .map(|s| {
+            percent_encoding::percent_decode_str(s)
+                .decode_utf8_lossy()
+                .to_string()
+        })
+        .filter(|s| !s.is_empty() && s != "/");
+    let mut name = last.unwrap_or_else(|| "download".to_string());
+    if !name.contains('.') {
+        let ext = extension_for(content_type);
+        name.push('.');
+        name.push_str(ext);
+    }
+    name
+}
+
+/// Return a non-clobbering path in `dir`: if `dir/name` exists, append
+/// ` (1)`, ` (2)`, … before the extension until a free path is found.
+fn unique_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let candidate = dir.join(name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    // Split stem and extension (extension = from the last '.').
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    };
+    for n in 1u32.. {
+        let candidate = dir.join(format!("{} ({}){}", stem, n, ext));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    dir.join(name)
+}
+
+/// Human-readable byte size (e.g. `1.2 MB`).
+fn human_size(n: usize) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    let n = n as f64;
+    if n < KB {
+        format!("{} B", n as u64)
+    } else if n < MB {
+        format!("{:.1} KB", n / KB)
+    } else {
+        format!("{:.1} MB", n / MB)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{derive_filename, extension_for, human_size};
+
+    #[test]
+    fn filename_from_url_path() {
+        let url = url::Url::parse("https://example.com/a/b/report.pdf").unwrap();
+        assert_eq!(derive_filename(&url, "application/pdf"), "report.pdf");
+    }
+
+    #[test]
+    fn filename_appends_extension_from_content_type() {
+        let url = url::Url::parse("https://example.com/download").unwrap();
+        assert_eq!(derive_filename(&url, "application/zip"), "download.zip");
+    }
+
+    #[test]
+    fn filename_keeps_extension_even_if_content_type_differs() {
+        let url = url::Url::parse("https://example.com/data.bin").unwrap();
+        assert_eq!(derive_filename(&url, "application/pdf"), "data.bin");
+    }
+
+    #[test]
+    fn filename_falls_back_when_no_path_segment() {
+        let url = url::Url::parse("https://example.com/").unwrap();
+        assert_eq!(derive_filename(&url, "image/png"), "download.png");
+    }
+
+    #[test]
+    fn filename_percent_decodes_segment() {
+        let url = url::Url::parse("https://example.com/hello%20world.txt").unwrap();
+        assert_eq!(derive_filename(&url, "text/plain"), "hello world.txt");
+    }
+
+    #[test]
+    fn extension_for_known_types() {
+        assert_eq!(extension_for("application/pdf"), "pdf");
+        assert_eq!(extension_for("image/jpeg"), "jpg");
+        assert_eq!(extension_for("application/octet-stream"), "bin");
+        assert_eq!(extension_for("text/html; charset=utf-8"), "bin");
+    }
+
+    #[test]
+    fn human_size_formats() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(2048), "2.0 KB");
+        assert_eq!(human_size(1_500_000), "1.4 MB");
+    }
+}
+
 fn plain_span(text: &str) -> crate::layout::Span {
     crate::layout::Span {
         text: text.to_string(),
@@ -1075,6 +1328,12 @@ async fn event_loop(
                 Event::Key(key) => {
                     if app.url_bar_open {
                         app.handle_url_input(key).await?;
+                        continue;
+                    }
+
+                    // Download prompt takes priority over normal key handling.
+                    if app.pending_download.is_some() {
+                        app.handle_download_prompt_key(key)?;
                         continue;
                     }
 
