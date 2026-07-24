@@ -3,6 +3,9 @@ name = "clibrowser"
 version = "0.1.0"
 edition = "2021"
 description = "A full-featured CLI web browser"
+license = "GPL-2.0-only"
+keywords = ["browser", "cli", "tui", "web", "terminal"]
+categories = ["command-line-utilities", "web-programming"]
 
 [[bin]]
 name = "clibrowser"
