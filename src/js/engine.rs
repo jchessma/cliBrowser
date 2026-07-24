@@ -7,6 +7,10 @@ pub struct JsResult {
     pub html: Option<String>,
     /// Console output from scripts.
     pub console: Vec<String>,
+    /// Final URL after the backend navigated (e.g. Chrome following redirects or
+    /// JS-driven navigation). `None` for backends that don't navigate (QuickJS,
+    /// None), which leaves the originally fetched URL in place.
+    pub final_url: Option<String>,
 }
 
 /// Which JS backend to use.

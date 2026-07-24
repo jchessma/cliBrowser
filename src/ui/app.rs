@@ -133,6 +133,14 @@ impl App {
         self.state.status = PageStatus::Loading;
         self.status_msg = Some(format!("Loading {}…", url));
 
+        // The Chrome backend fetches and renders via headless Chrome itself, so
+        // for GET navigation we let it produce the response directly instead of
+        // pre-fetching with reqwest (Chrome's real UA also bypasses simple
+        // bot-blocking that would reject reqwest). POST still uses reqwest.
+        if post_body.is_none() && self.js_engine.name() == "chrome" {
+            return self.chrome_get_and_load(url).await;
+        }
+
         let resp = match post_body {
             Some((body, ct)) => self.client.post(&url, body, ct, &self.cookies).await,
             None => self.client.get(&url, &self.cookies).await,
@@ -157,12 +165,50 @@ impl App {
         Ok(())
     }
 
-    fn load_response(&mut self, resp: crate::network::Response) -> Result<()> {
-        let html = match self.js_engine.execute(&resp.url, &resp.body) {
-            Ok(r) => r.html.unwrap_or(resp.body.clone()),
+    /// Chrome-driven GET: navigate the headless browser to `url` and load the
+    /// rendered DOM. Cookies are owned by Chrome, not the reqwest `CookieStore`.
+    async fn chrome_get_and_load(&mut self, url: Url) -> Result<()> {
+        let result = self.js_engine.execute(&url, "");
+        let resp = match result {
+            Ok(r) => {
+                let final_url = r
+                    .final_url
+                    .as_deref()
+                    .and_then(|s| Url::parse(s).ok())
+                    .unwrap_or(url);
+                crate::network::Response {
+                    url: final_url.clone(),
+                    status: 200,
+                    content_type: "text/html".to_string(),
+                    body: r.html.unwrap_or_default(),
+                    set_cookies: Vec::new(),
+                }
+            }
             Err(e) => {
-                tracing::warn!("JS execution error: {}", e);
-                resp.body.clone()
+                self.state.status = PageStatus::Error(e.to_string());
+                self.status_msg = Some(format!("Error: {}", e));
+                return Err(e);
+            }
+        };
+
+        self.history.navigate(resp.url.to_string());
+        self.load_response(resp)?;
+        Ok(())
+    }
+
+    fn load_response(&mut self, resp: crate::network::Response) -> Result<()> {
+        // For the Chrome backend, `resp.body` is already the JS-rendered DOM
+        // produced by Chrome during fetch (see `chrome_get_and_load`). Re-running
+        // `execute` would navigate Chrome to the URL again, so skip it.
+        let html = if self.js_engine.name() == "chrome" {
+            resp.body.clone()
+        } else {
+            match self.js_engine.execute(&resp.url, &resp.body) {
+                Ok(r) => r.html.unwrap_or(resp.body.clone()),
+                Err(e) => {
+                    tracing::warn!("JS execution error: {}", e);
+                    resp.body.clone()
+                }
             }
         };
 

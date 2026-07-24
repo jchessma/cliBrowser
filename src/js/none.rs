@@ -10,6 +10,7 @@ impl JsEngine for NoEngine {
         Ok(JsResult {
             html: None,
             console: Vec::new(),
+            final_url: None,
         })
     }
 

@@ -19,6 +19,7 @@ impl JsEngine for QuickJsEngine {
             return Ok(JsResult {
                 html: None,
                 console: Vec::new(),
+                final_url: None,
             });
         }
 
@@ -87,6 +88,7 @@ impl JsEngine for QuickJsEngine {
         Ok(JsResult {
             html: None,
             console: Vec::new(),
+            final_url: None,
         })
     }
 
